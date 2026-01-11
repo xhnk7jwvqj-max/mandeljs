@@ -11,6 +11,8 @@
     "vite": "^2.7.2"
   },
   "dependencies": {
+    "@ffmpeg/ffmpeg": "^0.12.10",
+    "@ffmpeg/util": "^0.12.1",
     "bignumber.js": "^9.0.2",
     "gl-matrix": "^3.4.3",
     "gmp-wasm": "^1.1.0",
