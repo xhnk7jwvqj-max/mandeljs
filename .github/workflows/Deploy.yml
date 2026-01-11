@@ -3,18 +3,56 @@ on:
   push:
     branches:
       - master
+  workflow_dispatch:
+    inputs:
+      deployment_type:
+        description: 'Deployment type (project or custom_domain)'
+        required: false
+        default: 'project'
+        type: choice
+        options:
+          - project
+          - custom_domain
+      custom_domain:
+        description: 'Custom domain (only for custom_domain type)'
+        required: false
+        default: ''
+
+env:
+  # Set deployment type: 'project' for username.github.io/mandeljs or 'custom_domain' for custom domain
+  # Can be overridden by workflow_dispatch input or by setting DEPLOYMENT_TYPE repository variable
+  DEPLOYMENT_TYPE: ${{ inputs.deployment_type || vars.DEPLOYMENT_TYPE || 'project' }}
+  # Custom domain name (e.g., 'example.com') - only used when DEPLOYMENT_TYPE is 'custom_domain'
+  CUSTOM_DOMAIN: ${{ inputs.custom_domain || vars.CUSTOM_DOMAIN || '' }}
+
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v2
+
       - name: Install Node
         uses: actions/setup-node@v2
+
       - name: Build
         run: |
+          # Set BASE_PATH based on deployment type
+          if [ "${{ env.DEPLOYMENT_TYPE }}" = "custom_domain" ]; then
+            export BASE_PATH='/'
+            echo "Building for custom domain with base path: /"
+          else
+            export BASE_PATH='/mandeljs/'
+            echo "Building for GitHub Pages project site with base path: /mandeljs/"
+          fi
           yarn
           npx vite build
+
+      - name: Create CNAME file for custom domain
+        if: env.DEPLOYMENT_TYPE == 'custom_domain' && env.CUSTOM_DOMAIN != ''
+        run: |
+          echo "${{ env.CUSTOM_DOMAIN }}" > dist/CNAME
+          echo "Created CNAME file with domain: ${{ env.CUSTOM_DOMAIN }}"
 
       - name: Deploy
         uses: JamesIves/github-pages-deploy-action@releases/v3
