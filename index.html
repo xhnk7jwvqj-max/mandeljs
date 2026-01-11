@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mandelbrot Viewer</title>
+    <script type="module" crossorigin src="/assets/index.4e102d28.js"></script>
+    <link rel="modulepreload" href="/assets/vendor.670ff1b3.js">
+    <link rel="stylesheet" href="/assets/index.58c0d9c3.css">
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="canvas" width="700" height="700"></canvas>
+      <div>
+        <button id="out">Zoom Out</button>
+        <button id="reset">Reset</button>
+        <label>Iterations</label>
+        <select id="iterations">
+          <option value="1000">1000</option>
+          <option value="10000">10000</option>
+          <option value="30000">30000</option>
+          <option value="100000">100000</option>
+        </select>
+        <label>Color Map Scale</label><input id="cmapscale" type="number" value="20" />
+      </div>
+      <div>
+        <button id="setZoomStart" onclick="setZoomAnimationStart()">Set Zoom Start</button>
+        <button id="renderZoom" onclick="renderZoomToCurrentPosition()">Render Zoom Animation</button>
+      </div>
+      <textarea id="clickpos" cols="50" rows="6"></textarea>
+      <br />
+      <a href="https://www.hgreer.com/JavascriptMandelbrot/">Back to Blog</a>
+    </div>
+    
+  </body>
+</html>
