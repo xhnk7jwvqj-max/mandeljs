@@ -1,6 +1,8 @@
 import "./style.css";
 
 import { init } from "gmp-wasm";
+import { FFmpeg } from "@ffmpeg/ffmpeg";
+import { fetchFile, toBlobURL } from "@ffmpeg/util";
 
 import { getCursorPos, getTouchPos, initShaderProgram, createMatrices } from "./glutils.js";
 
@@ -593,4 +595,505 @@ void main() {
       gl.drawArrays(gl.TRIANGLE_STRIP, offset, vertexCount);
     }
   }
+
+  // Zoom Animation System
+  let zoomAnimationState = {
+    isRecording: false,
+    startPosition: null,
+    ffmpegLoaded: false,
+    ffmpeg: null,
+  };
+
+  // Initialize FFmpeg
+  async function loadFFmpeg() {
+    if (zoomAnimationState.ffmpegLoaded) return;
+
+    const ffmpeg = new FFmpeg();
+    const baseURL = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd";
+
+    await ffmpeg.load({
+      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
+      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
+    });
+
+    zoomAnimationState.ffmpeg = ffmpeg;
+    zoomAnimationState.ffmpegLoaded = true;
+    console.log("FFmpeg loaded successfully");
+  }
+
+  // Calculate power-of-two zoom levels between two positions
+  function calculatePowerOfTwoLevels(startRadius, endRadius) {
+    const startLog = Math.log2(binding.mpfr_get_d(startRadius, 0));
+    const endLog = Math.log2(binding.mpfr_get_d(endRadius, 0));
+
+    const levels = [];
+
+    // Find all power-of-two levels between start and end
+    const minLog = Math.min(startLog, endLog);
+    const maxLog = Math.max(startLog, endLog);
+
+    for (let i = Math.floor(maxLog); i >= Math.ceil(minLog); i--) {
+      const radiusValue = Math.pow(2, i);
+      levels.push(radiusValue);
+    }
+
+    return levels;
+  }
+
+  // Render a frame to an off-screen canvas and return image data
+  function renderFrameToCanvas(centerX, centerY, radius, iterations, cmapscale, width, height) {
+    // Create an offscreen canvas
+    const offscreenCanvas = document.createElement('canvas');
+    offscreenCanvas.width = width;
+    offscreenCanvas.height = height;
+
+    const offscreenGl = offscreenCanvas.getContext('webgl2');
+    if (!offscreenGl) {
+      throw new Error("Unable to initialize WebGL for offscreen rendering");
+    }
+
+    // Initialize shaders and buffers for offscreen canvas
+    const vsSource = `#version 300 es
+in vec4 aVertexPosition;
+uniform mat4 uModelViewMatrix;
+uniform mat4 uProjectionMatrix;
+out highp vec2 delta;
+void main() {
+  gl_Position = uProjectionMatrix * uModelViewMatrix * aVertexPosition;
+  delta = vec2(aVertexPosition[0], aVertexPosition[1]);
+}
+  `;
+    const fsSource = `#version 300 es
+precision highp float;
+in highp vec2 delta;
+out vec4 fragColor;
+uniform vec4 uState;
+uniform vec4 poly1;
+uniform vec4 poly2;
+uniform sampler2D sequence;
+float get_orbit_x(int i) {
+  i = i * 3;
+  int row = i / 1024;
+  return texelFetch(sequence, ivec2( i % 1024, row), 0)[0];
+}
+float get_orbit_y(int i) {
+  i = i * 3 + 1;
+  int row = i / 1024;
+  return texelFetch(sequence, ivec2( i % 1024, row), 0)[0];
+}
+float get_orbit_scale(int i) {
+  i = i * 3 + 2;
+  int row = i / 1024;
+  return texelFetch(sequence, ivec2( i % 1024, row), 0)[0];
+}
+void main() {
+  int q = int(uState[2]) - 1;
+  int cq = q;
+  q = q + int(poly2[3]);
+  float S = pow(2., float(q));
+  float dcx = delta[0];
+  float dcy = delta[1];
+  float x;
+  float y;
+  // dx + dyi = (p0 + p1 i) * (dcx, dcy) + (p2 + p3i) * (dcx + dcy * i) * (dcx + dcy * i)
+  float sqrx =  (dcx * dcx - dcy * dcy);
+  float sqry =  (2. * dcx * dcy);
+
+  float cux =  (dcx * sqrx - dcy * sqry);
+  float cuy =  (dcx * sqry + dcy * sqrx);
+  float dx = poly1[0]  * dcx - poly1[1] *  dcy + poly1[2] * sqrx - poly1[3] * sqry ;// + poly2[0] * cux - poly2[1] * cuy;
+  float dy = poly1[0] *  dcy + poly1[1] *  dcx + poly1[2] * sqry + poly1[3] * sqrx ;//+ poly2[0] * cuy + poly2[1] * cux;
+
+  int k = int(poly2[2]);
+
+  if (false) {
+      q = cq;
+      dx = 0.;
+      dy = 0.;
+      k = 0;
+  }
+  int j = k;
+  x = get_orbit_x(k);
+  y = get_orbit_y(k);
+
+  for (int i = k; float(i) < uState[3]; i++){
+    j += 1;
+    k += 1;
+    float os = get_orbit_scale(k - 1);
+    dcx = delta[0] * pow(2., float(-q + cq - int(os)));
+    dcy = delta[1] * pow(2., float(-q + cq - int(os)));
+    float unS = pow(2., float(q) -get_orbit_scale(k - 1));
+
+    if (isinf(unS)) {
+    unS = 0.;
+      }
+
+    float tx = 2. * x * dx - 2. * y * dy + unS  * dx * dx - unS * dy * dy + dcx;
+    dy = 2. * x * dy + 2. * y * dx + unS * 2. * dx * dy +  dcy;
+    dx = tx;
+
+    q = q + int(os);
+    S = pow(2., float(q));
+
+    x = get_orbit_x(k);
+    y = get_orbit_y(k);
+    float fx = x * pow(2., get_orbit_scale(k)) + S * dx;
+    float fy = y * pow(2., get_orbit_scale(k))+ S * dy;
+    if (fx * fx + fy * fy > 4.){
+      break;
+    }
+
+
+    if ( true && dx * dx + dy * dy > 1000000.) {
+      dx = dx / 2.;
+      dy = dy / 2.;
+      q = q + 1;
+      S = pow(2., float(q));
+      dcx = delta[0] * pow(2., float(-q + cq));
+      dcy = delta[1] * pow(2., float(-q + cq));
+    }
+    if ( false && dx * dx + dy * dy < .25) {
+      dx = dx * 2.;
+      dy = dy * 2.;
+      q = q - 1;
+      S = pow(2., float(q));
+      dcx = delta[0] * pow(2., float(-q + cq));
+      dcy = delta[1] * pow(2., float(-q + cq));
+    }
+
+    if (true  && fx * fx + fy * fy < S * S * dx * dx + S * S * dy * dy || (x == -1. && y == -1.)) {
+      dx  = fx;
+      dy = fy;
+      q = 0;
+      S = pow(2., float(q));
+      dcx = delta[0] * pow(2., float(-q + cq));
+      dcy = delta[1] * pow(2., float(-q + cq));
+      k = 0;
+      x = get_orbit_x(0);
+      y = get_orbit_y(0);
+    }
+  }
+  float c = (uState[3] - float(j)) / uState[1];
+  fragColor = vec4(vec3(cos(c), cos(1.1214 * c) , cos(.8 * c)) / -2. + .5, 1.);
+}
+  `;
+
+    const shaderProgram = initShaderProgram(offscreenGl, vsSource, fsSource);
+    const programInfo = {
+      program: shaderProgram,
+      attribLocations: {
+        vertexPosition: offscreenGl.getAttribLocation(shaderProgram, "aVertexPosition"),
+      },
+      uniformLocations: {
+        projectionMatrix: offscreenGl.getUniformLocation(shaderProgram, "uProjectionMatrix"),
+        modelViewMatrix: offscreenGl.getUniformLocation(shaderProgram, "uModelViewMatrix"),
+        state: offscreenGl.getUniformLocation(shaderProgram, "uState"),
+        poly1: offscreenGl.getUniformLocation(shaderProgram, "poly1"),
+        poly2: offscreenGl.getUniformLocation(shaderProgram, "poly2"),
+      },
+    };
+
+    // Create buffers
+    const positionBuffer = offscreenGl.createBuffer();
+    offscreenGl.bindBuffer(offscreenGl.ARRAY_BUFFER, positionBuffer);
+    const positions = [1.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0, -1.0];
+    offscreenGl.bufferData(offscreenGl.ARRAY_BUFFER, new Float32Array(positions), offscreenGl.STATIC_DRAW);
+
+    const buffers = {
+      position: positionBuffer,
+    };
+
+    // Set up temporary state
+    const tempCenterX = mpfr_zero();
+    const tempCenterY = mpfr_zero();
+    const tempRadius = mpfr_zero();
+
+    binding.mpfr_set(tempCenterX, centerX, 0);
+    binding.mpfr_set(tempCenterY, centerY, 0);
+    binding.mpfr_set(tempRadius, radius, 0);
+
+    const prevCenter = mandelbrot_state.center;
+    const prevRadius = mandelbrot_state.radius;
+    const prevIterations = mandelbrot_state.iterations;
+    const prevCmapscale = mandelbrot_state.cmapscale;
+
+    mandelbrot_state.center = [tempCenterX, tempCenterY];
+    mandelbrot_state.radius = tempRadius;
+    mandelbrot_state.iterations = iterations;
+    mandelbrot_state.cmapscale = cmapscale;
+
+    // Compute orbit for this frame
+    const [orbit, poly, polylim] = make_reference_orbit();
+
+    // Restore state
+    mandelbrot_state.center = prevCenter;
+    mandelbrot_state.radius = prevRadius;
+    mandelbrot_state.iterations = prevIterations;
+    mandelbrot_state.cmapscale = prevCmapscale;
+
+    // Set up texture
+    const tex = offscreenGl.createTexture();
+    offscreenGl.bindTexture(offscreenGl.TEXTURE_2D, tex);
+    offscreenGl.texParameteri(offscreenGl.TEXTURE_2D, offscreenGl.TEXTURE_MIN_FILTER, offscreenGl.NEAREST);
+    offscreenGl.texParameteri(offscreenGl.TEXTURE_2D, offscreenGl.TEXTURE_MAG_FILTER, offscreenGl.NEAREST);
+    offscreenGl.pixelStorei(offscreenGl.UNPACK_ALIGNMENT, 1);
+    offscreenGl.texImage2D(offscreenGl.TEXTURE_2D, 0, offscreenGl.R32F, 1024, 1024, 0, offscreenGl.RED, offscreenGl.FLOAT, new Float32Array(orbit));
+
+    // Render
+    offscreenGl.clearColor(0.0, 0.0, 0.0, 1.0);
+    offscreenGl.clearDepth(1.0);
+    offscreenGl.enable(offscreenGl.DEPTH_TEST);
+    offscreenGl.depthFunc(offscreenGl.LEQUAL);
+    offscreenGl.clear(offscreenGl.COLOR_BUFFER_BIT | offscreenGl.DEPTH_BUFFER_BIT);
+
+    let projectionMatrix, modelViewMatrix;
+    [projectionMatrix, modelViewMatrix] = createMatrices(offscreenGl);
+
+    {
+      const numComponents = 2;
+      const type = offscreenGl.FLOAT;
+      const normalize = false;
+      const stride = 0;
+      const offset = 0;
+      offscreenGl.bindBuffer(offscreenGl.ARRAY_BUFFER, buffers.position);
+      offscreenGl.vertexAttribPointer(
+        programInfo.attribLocations.vertexPosition,
+        numComponents,
+        type,
+        normalize,
+        stride,
+        offset,
+      );
+      offscreenGl.enableVertexAttribArray(programInfo.attribLocations.vertexPosition);
+    }
+
+    offscreenGl.useProgram(programInfo.program);
+    offscreenGl.uniformMatrix4fv(programInfo.uniformLocations.projectionMatrix, false, projectionMatrix);
+    offscreenGl.uniformMatrix4fv(programInfo.uniformLocations.modelViewMatrix, false, modelViewMatrix);
+
+    const rexp = binding.mpfr_get_exp(tempRadius);
+    const _ = 0;
+    const r = binding.mpfr_get_d_2exp(_, tempRadius, 0);
+    const rScaled = [r, rexp];
+
+    offscreenGl.uniform4f(
+      programInfo.uniformLocations.state,
+      tempCenterX,
+      cmapscale,
+      1 + get_exp(tempRadius),
+      iterations,
+    );
+
+    const poly_scale_exp = mul([1, 0], maxabs(poly[0], poly[1]));
+    const poly_scale = [1, -poly_scale_exp[1]];
+
+    const poly_scaled = [
+      mul(poly_scale, poly[0]),
+      mul(poly_scale, poly[1]),
+      mul(poly_scale, mul(rScaled, poly[2])),
+      mul(poly_scale, mul(rScaled, poly[3])),
+      mul(poly_scale, mul(rScaled, mul(rScaled, poly[4]))),
+      mul(poly_scale, mul(rScaled, mul(rScaled, poly[5]))),
+    ].map(floaty);
+
+    offscreenGl.uniform4f(
+      programInfo.uniformLocations.poly1,
+      poly_scaled[0],
+      poly_scaled[1],
+      poly_scaled[2],
+      poly_scaled[3],
+    );
+    offscreenGl.uniform4f(
+      programInfo.uniformLocations.poly2,
+      poly_scaled[4],
+      poly_scaled[5],
+      polylim,
+      poly_scale_exp[1],
+    );
+
+    {
+      const offset = 0;
+      const vertexCount = 4;
+      offscreenGl.drawArrays(offscreenGl.TRIANGLE_STRIP, offset, vertexCount);
+    }
+
+    // Read pixels
+    const pixels = new Uint8Array(width * height * 4);
+    offscreenGl.readPixels(0, 0, width, height, offscreenGl.RGBA, offscreenGl.UNSIGNED_BYTE, pixels);
+
+    return pixels;
+  }
+
+  // Bilinear interpolation between two frames
+  function interpolateFrames(frame1, frame2, t, width, height) {
+    const result = new Uint8Array(width * height * 4);
+
+    for (let i = 0; i < result.length; i++) {
+      result[i] = Math.round(frame1[i] * (1 - t) + frame2[i] * t);
+    }
+
+    return result;
+  }
+
+  // Main zoom animation renderer
+  async function renderZoomAnimation(startCenterX, startCenterY, startRadius, endCenterX, endCenterY, endRadius, duration = 5, fps = 30) {
+    console.log("Starting zoom animation render...");
+
+    // Load FFmpeg if not already loaded
+    await loadFFmpeg();
+
+    const width = 1920;
+    const height = 1080;
+    const totalFrames = duration * fps;
+
+    // Calculate power-of-two zoom levels
+    const powerOfTwoLevels = calculatePowerOfTwoLevels(startRadius, endRadius);
+    console.log("Power-of-two levels:", powerOfTwoLevels);
+
+    // Render keyframes at power-of-two zoom levels
+    console.log("Rendering keyframes...");
+    const keyframes = [];
+    const keyframePositions = [];
+
+    // Add start frame
+    keyframes.push(renderFrameToCanvas(startCenterX, startCenterY, startRadius, mandelbrot_state.iterations, mandelbrot_state.cmapscale, width, height));
+    keyframePositions.push(0);
+
+    // Render keyframes at each power-of-two level
+    const startLog = Math.log2(binding.mpfr_get_d(startRadius, 0));
+    const endLog = Math.log2(binding.mpfr_get_d(endRadius, 0));
+    const totalLogDiff = endLog - startLog;
+
+    for (const radiusValue of powerOfTwoLevels) {
+      const t = (Math.log2(radiusValue) - startLog) / totalLogDiff;
+
+      // Interpolate position
+      const tempCenterX = mpfr_zero();
+      const tempCenterY = mpfr_zero();
+      const tempRadius = mpfr_zero();
+
+      // Linear interpolation in MPFR space
+      const dx = mpfr_zero();
+      binding.mpfr_sub(dx, endCenterX, startCenterX, 0);
+      binding.mpfr_mul_d(dx, dx, t, 0);
+      binding.mpfr_add(tempCenterX, startCenterX, dx, 0);
+
+      const dy = mpfr_zero();
+      binding.mpfr_sub(dy, endCenterY, startCenterY, 0);
+      binding.mpfr_mul_d(dy, dy, t, 0);
+      binding.mpfr_add(tempCenterY, startCenterY, dy, 0);
+
+      binding.mpfr_set_d(tempRadius, radiusValue, 0);
+
+      console.log(`Rendering keyframe at t=${t.toFixed(3)}, radius=${radiusValue}`);
+
+      keyframes.push(renderFrameToCanvas(tempCenterX, tempCenterY, tempRadius, mandelbrot_state.iterations, mandelbrot_state.cmapscale, width, height));
+      keyframePositions.push(Math.round(t * totalFrames));
+    }
+
+    // Add end frame
+    keyframes.push(renderFrameToCanvas(endCenterX, endCenterY, endRadius, mandelbrot_state.iterations, mandelbrot_state.cmapscale, width, height));
+    keyframePositions.push(totalFrames - 1);
+
+    console.log("Generating interpolated frames...");
+
+    // Generate all frames with interpolation
+    const ffmpeg = zoomAnimationState.ffmpeg;
+
+    for (let frameIdx = 0; frameIdx < totalFrames; frameIdx++) {
+      // Find the two keyframes to interpolate between
+      let keyframeIdx = 0;
+      for (let i = 0; i < keyframePositions.length - 1; i++) {
+        if (frameIdx >= keyframePositions[i] && frameIdx <= keyframePositions[i + 1]) {
+          keyframeIdx = i;
+          break;
+        }
+      }
+
+      const startKeyframePos = keyframePositions[keyframeIdx];
+      const endKeyframePos = keyframePositions[keyframeIdx + 1];
+      const t = (frameIdx - startKeyframePos) / (endKeyframePos - startKeyframePos);
+
+      let frameData;
+      if (t === 0) {
+        frameData = keyframes[keyframeIdx];
+      } else if (t === 1) {
+        frameData = keyframes[keyframeIdx + 1];
+      } else {
+        frameData = interpolateFrames(keyframes[keyframeIdx], keyframes[keyframeIdx + 1], t, width, height);
+      }
+
+      // Write frame to FFmpeg
+      const frameName = `frame${frameIdx.toString().padStart(5, '0')}.rgba`;
+      await ffmpeg.writeFile(frameName, frameData);
+
+      if (frameIdx % 10 === 0) {
+        console.log(`Generated frame ${frameIdx + 1}/${totalFrames}`);
+      }
+    }
+
+    console.log("Encoding video...");
+
+    // Encode video with FFmpeg
+    await ffmpeg.exec([
+      '-f', 'rawvideo',
+      '-pixel_format', 'rgba',
+      '-video_size', `${width}x${height}`,
+      '-framerate', fps.toString(),
+      '-i', 'frame%05d.rgba',
+      '-c:v', 'libx264',
+      '-preset', 'slow',
+      '-crf', '18',
+      '-pix_fmt', 'yuv420p',
+      'output.mp4'
+    ]);
+
+    console.log("Reading output video...");
+    const data = await ffmpeg.readFile('output.mp4');
+
+    // Create a download link
+    const blob = new Blob([data.buffer], { type: 'video/mp4' });
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'mandelbrot_zoom.mp4';
+    a.click();
+
+    console.log("Video download started!");
+  }
+
+  // Set start position for zoom animation
+  window.setZoomAnimationStart = function() {
+    zoomAnimationState.startPosition = {
+      centerX: mpfr_zero(),
+      centerY: mpfr_zero(),
+      radius: mpfr_zero(),
+    };
+
+    binding.mpfr_set(zoomAnimationState.startPosition.centerX, mandelbrot_state.center[0], 0);
+    binding.mpfr_set(zoomAnimationState.startPosition.centerY, mandelbrot_state.center[1], 0);
+    binding.mpfr_set(zoomAnimationState.startPosition.radius, mandelbrot_state.radius, 0);
+
+    console.log("Zoom animation start position set!");
+    alert("Start position recorded! Navigate to your desired end position and click 'Render Zoom Animation'.");
+  };
+
+  // Render zoom animation from start to current position
+  window.renderZoomToCurrentPosition = async function() {
+    if (!zoomAnimationState.startPosition) {
+      alert("Please set a start position first!");
+      return;
+    }
+
+    const startCenterX = zoomAnimationState.startPosition.centerX;
+    const startCenterY = zoomAnimationState.startPosition.centerY;
+    const startRadius = zoomAnimationState.startPosition.radius;
+
+    const endCenterX = mandelbrot_state.center[0];
+    const endCenterY = mandelbrot_state.center[1];
+    const endRadius = mandelbrot_state.radius;
+
+    await renderZoomAnimation(startCenterX, startCenterY, startRadius, endCenterX, endCenterY, endRadius, 5, 30);
+  };
 });
