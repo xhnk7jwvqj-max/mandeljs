@@ -13,36 +13,29 @@ npx vite
 
 ## Deployment
 
-This project supports two deployment modes:
+The site uses relative paths and works automatically at any URL - no configuration needed!
 
-### 1. GitHub Pages Project Site (username.github.io/mandeljs)
+### GitHub Pages Project Site (Default)
 
-**Default mode** - Deploys to `https://username.github.io/mandeljs/`
+Push to `master` branch to deploy to `https://username.github.io/mandeljs/`
 
-The workflow automatically uses this mode when pushing to the `master` branch.
+### Custom Domain Deployment
 
-No configuration needed - just push to master!
+To deploy to a custom domain like `https://example.com/`:
 
-### 2. Custom Domain Deployment
-
-Deploys to a custom domain like `https://example.com/`
-
-#### Option A: Manual Trigger (Recommended for testing)
+#### Option A: Manual Trigger
 
 1. Go to Actions tab in GitHub
 2. Click "Build and Deploy" workflow
 3. Click "Run workflow"
-4. Select "custom_domain" as deployment type
-5. Enter your custom domain (e.g., `example.com`)
-6. Click "Run workflow"
+4. Enter your custom domain (e.g., `example.com`)
+5. Click "Run workflow"
 
-#### Option B: Set Repository Variables (Automatic)
+#### Option B: Set Repository Variable (Automatic)
 
 1. Go to repository Settings → Secrets and variables → Actions → Variables
-2. Add the following variables:
-   - `DEPLOYMENT_TYPE`: Set to `custom_domain`
-   - `CUSTOM_DOMAIN`: Set to your domain (e.g., `example.com`)
-3. Push to master - it will automatically deploy with custom domain settings
+2. Add variable: `CUSTOM_DOMAIN` with your domain (e.g., `example.com`)
+3. Push to master - CNAME file will be created automatically
 
 #### Configure DNS
 
@@ -52,14 +45,7 @@ After deploying with custom domain:
 
 ### Local Testing
 
-To test the build locally with different base paths:
-
 ```bash
-# Test with project site base path
-BASE_PATH='/mandeljs/' yarn build
-yarn preview
-
-# Test with custom domain (root path)
-BASE_PATH='/' yarn build
+yarn build
 yarn preview
 ```

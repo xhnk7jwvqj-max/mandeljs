@@ -2,7 +2,7 @@ import { defineConfig } from 'vite'
 
 // https://vitejs.dev/config/
 export default defineConfig({
-  // Use BASE_PATH environment variable, default to '/mandeljs/' for GitHub Pages project site
-  // Set to '/' for custom domain deployment
-  base: process.env.BASE_PATH || '/mandeljs/',
+  // Use relative paths so the site works at any base URL
+  // Works for both username.github.io/mandeljs/ and custom domains
+  base: './',
 })
