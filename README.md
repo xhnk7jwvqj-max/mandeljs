@@ -8,5 +8,3 @@ to serve mandel.js
 yarn
 npx vite
 ```
-
-For custom domain deployment, set the `CUSTOM_DOMAIN` repository variable or use workflow dispatch.

@@ -3,34 +3,18 @@ on:
   push:
     branches:
       - master
-  workflow_dispatch:
-    inputs:
-      custom_domain:
-        description: 'Custom domain (leave empty for default github.io)'
-        required: false
-        default: ''
-
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v2
-
       - name: Install Node
         uses: actions/setup-node@v2
-
       - name: Build
         run: |
           yarn
           npx vite build
-
-      - name: Create CNAME file for custom domain
-        if: inputs.custom_domain != '' || vars.CUSTOM_DOMAIN != ''
-        run: |
-          DOMAIN="${{ inputs.custom_domain || vars.CUSTOM_DOMAIN }}"
-          echo "$DOMAIN" > dist/CNAME
-          echo "Created CNAME file with domain: $DOMAIN"
 
       - name: Deploy
         uses: JamesIves/github-pages-deploy-action@releases/v3
